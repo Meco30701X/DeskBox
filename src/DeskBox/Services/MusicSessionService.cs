@@ -1,9 +1,7 @@
 using Windows.Media;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
-
 namespace DeskBox.Services;
-
 public enum MusicPlaybackState
 {
     Unknown,
@@ -11,14 +9,12 @@ public enum MusicPlaybackState
     Playing,
     Paused
 }
-
 public enum MusicPlaybackMode
 {
     Normal,
     Shuffle,
     Repeat
 }
-
 public sealed record MusicSessionInfo(
     string SessionId,
     string SourceAppUserModelId,
@@ -38,18 +34,15 @@ public sealed record MusicSessionInfo(
     bool CanChangeRepeat,
     MusicPlaybackMode PlaybackMode,
     IRandomAccessStreamReference? Thumbnail);
-
 public sealed record MusicSessionOption(
     string SessionId,
     string SourceAppUserModelId,
     string SourceDisplayName,
     MusicPlaybackState PlaybackState,
     bool IsSystemCurrent);
-
 public sealed record MusicTimelineSnapshot(
     TimeSpan Position,
     TimeSpan Duration);
-
 public sealed record MusicPlaybackSnapshot(
     MusicPlaybackState PlaybackState,
     bool CanPlay,
@@ -60,75 +53,109 @@ public sealed record MusicPlaybackSnapshot(
     bool CanChangeShuffle,
     bool CanChangeRepeat,
     MusicPlaybackMode PlaybackMode);
-
 public sealed class MusicSessionService : IDisposable
 {
+    private readonly DesktopMusicFallbackProvider _fallbackProvider = new();
     private GlobalSystemMediaTransportControlsSessionManager? _manager;
     private GlobalSystemMediaTransportControlsSession? _currentSession;
     private bool _isInitialized;
     private bool _isDisposed;
-
     public event EventHandler? SessionsChanged;
     public event EventHandler? CurrentSessionChanged;
     public event EventHandler? PlaybackInfoChanged;
     public event EventHandler? MediaPropertiesChanged;
     public event EventHandler? TimelinePropertiesChanged;
-
+    public MusicSessionService()
+    {
+        _fallbackProvider.SessionsChanged += FallbackProvider_SessionsChanged;
+        _fallbackProvider.PlaybackInfoChanged += FallbackProvider_PlaybackInfoChanged;
+        _fallbackProvider.MediaPropertiesChanged += FallbackProvider_MediaPropertiesChanged;
+        _fallbackProvider.TimelinePropertiesChanged += FallbackProvider_TimelinePropertiesChanged;
+    }
     public async Task InitializeAsync()
     {
         if (_isDisposed || _isInitialized)
         {
             return;
         }
-
-        var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-        if (_isDisposed)
+        _fallbackProvider.StartMonitoring();
+        try
         {
-            return;
+            var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+            if (_isDisposed)
+            {
+                return;
+            }
+            _manager = manager;
+            _manager.SessionsChanged += Manager_SessionsChanged;
+            _manager.CurrentSessionChanged += Manager_CurrentSessionChanged;
+            AttachCurrentSession(_manager.GetCurrentSession());
         }
-
-        _manager = manager;
-        _manager.SessionsChanged += Manager_SessionsChanged;
-        _manager.CurrentSessionChanged += Manager_CurrentSessionChanged;
-        AttachCurrentSession(_manager.GetCurrentSession());
+        catch (Exception ex)
+        {
+            App.Log($"[MusicSession] SMTC manager initialization failed, continuing with desktop fallback provider: {ex.Message}");
+        }
         _isInitialized = true;
     }
-
     public IReadOnlyList<MusicSessionOption> GetSessionOptions()
     {
-        if (_isDisposed || _manager is null)
+        if (_isDisposed)
         {
             return [];
         }
-
-        GlobalSystemMediaTransportControlsSession? systemCurrent = _manager.GetCurrentSession();
         var options = new List<MusicSessionOption>();
-        foreach (SessionEntry entry in EnumerateSessionEntries())
+        var coveredPlayers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (_manager is not null)
         {
-            try
+            GlobalSystemMediaTransportControlsSession? systemCurrent = _manager.GetCurrentSession();
+            foreach (SessionEntry entry in EnumerateSessionEntries())
             {
-                var playbackInfo = entry.Session.GetPlaybackInfo();
-                string sourceApp = entry.Session.SourceAppUserModelId ?? string.Empty;
-                options.Add(new MusicSessionOption(
-                    entry.SessionId,
-                    sourceApp,
-                    GetSourceDisplayName(sourceApp),
-                    MapPlaybackState(playbackInfo.PlaybackStatus),
-                    IsSameSession(entry.Session, systemCurrent)));
-            }
-            catch (Exception ex)
-            {
-                // A source can disappear between GetSessions() and reading its
-                // state. Skip that stale entry; SessionsChanged will repopulate
-                // the picker without turning an ordinary player exit into an
-                // application error.
-                App.LogVerbose($"[MusicSession] Skipped stale source: {ex.Message}");
+                try
+                {
+                    var playbackInfo = entry.Session.GetPlaybackInfo();
+                    string sourceApp = entry.Session.SourceAppUserModelId ?? string.Empty;
+                    string displayName = GetSourceDisplayName(sourceApp);
+                    string? playerKey = TryMapToKnownPlayerKey(sourceApp, displayName);
+                    if (playerKey is not null)
+                    {
+                        coveredPlayers.Add(playerKey);
+                    }
+                    options.Add(new MusicSessionOption(
+                        entry.SessionId,
+                        sourceApp,
+                        displayName,
+                        MapPlaybackState(playbackInfo.PlaybackStatus),
+                        IsSameSession(entry.Session, systemCurrent)));
+                }
+                catch (Exception ex)
+                {
+                    // A source can disappear between GetSessions() and reading its
+                    // state. Skip that stale entry; SessionsChanged will repopulate
+                    // the picker without turning an ordinary player exit into an
+                    // application error.
+                    App.LogVerbose($"[MusicSession] Skipped stale source: {ex.Message}");
+                }
             }
         }
-
+        // Append running NetEase CloudMusic / QQMusic / KuGou sessions that did not register with SMTC.
+        IReadOnlyList<DesktopPlayerSnapshot> fallbackSnapshots = _fallbackProvider.GetActivePlayerSnapshots();
+        bool hasAnySmtcCurrent = options.Any(o => o.IsSystemCurrent);
+        foreach (DesktopPlayerSnapshot fallback in fallbackSnapshots)
+        {
+            if (coveredPlayers.Contains(fallback.PlayerKey))
+            {
+                continue;
+            }
+            bool isCurrent = !hasAnySmtcCurrent && fallback.PlaybackState == MusicPlaybackState.Playing;
+            options.Add(new MusicSessionOption(
+                fallback.SessionId,
+                fallback.SourceAppUserModelId,
+                fallback.SourceDisplayName,
+                fallback.PlaybackState,
+                isCurrent));
+        }
         return options;
     }
-
     public async Task<MusicSessionInfo?> GetCurrentSessionInfoAsync(string? preferredSessionId = null)
     {
         await InitializeAsync();
@@ -136,29 +163,51 @@ public sealed class MusicSessionService : IDisposable
         {
             return null;
         }
-
+        if (DesktopMusicFallbackProvider.IsFallbackSessionId(preferredSessionId))
+        {
+            DetachSession(_currentSession);
+            _currentSession = null;
+            DesktopPlayerSnapshot? fallbackSnapshot = ResolveFallbackSnapshot(preferredSessionId);
+            if (fallbackSnapshot is not null)
+            {
+                return CreateInfoFromFallbackSnapshot(fallbackSnapshot);
+            }
+        }
         var session = ResolveSession(preferredSessionId);
         AttachCurrentSession(session);
-        if (session is null)
+        if (session is not null)
         {
-            return null;
+            try
+            {
+                MusicSessionInfo smtcInfo = await CreateInfoAsync(session);
+                // If SMTC session is paused/idle or missing title while a fallback desktop player
+                // is actively playing (and the user is following system session), prefer the active player.
+                if (string.IsNullOrWhiteSpace(preferredSessionId) &&
+                    smtcInfo.PlaybackState != MusicPlaybackState.Playing &&
+                    string.IsNullOrWhiteSpace(smtcInfo.Title))
+                {
+                    DesktopPlayerSnapshot? activeFallback = ResolveFallbackSnapshot(null);
+                    if (activeFallback is not null &&
+                        (activeFallback.PlaybackState == MusicPlaybackState.Playing ||
+                         !string.IsNullOrWhiteSpace(activeFallback.Title)))
+                    {
+                        return CreateInfoFromFallbackSnapshot(activeFallback);
+                    }
+                }
+                return smtcInfo;
+            }
+            catch (Exception ex)
+            {
+                // The full-info read races the player's exit on its synchronous
+                // halves too; callers treat null as "no update" and the next
+                // refresh or SessionsChanged reattaches — same contract as the
+                // timeline and playback snapshot reads.
+                App.LogVerbose($"[MusicSession] Skipped stale session info read: {ex.Message}");
+            }
         }
-
-        try
-        {
-            return await CreateInfoAsync(session);
-        }
-        catch (Exception ex)
-        {
-            // The full-info read races the player's exit on its synchronous
-            // halves too; callers treat null as "no update" and the next
-            // refresh or SessionsChanged reattaches — same contract as the
-            // timeline and playback snapshot reads.
-            App.LogVerbose($"[MusicSession] Skipped stale session info read: {ex.Message}");
-            return null;
-        }
+        DesktopPlayerSnapshot? fallback = ResolveFallbackSnapshot(preferredSessionId);
+        return fallback is not null ? CreateInfoFromFallbackSnapshot(fallback) : null;
     }
-
     public async Task<MusicTimelineSnapshot?> GetCurrentTimelineAsync(string? preferredSessionId = null)
     {
         await InitializeAsync();
@@ -166,35 +215,54 @@ public sealed class MusicSessionService : IDisposable
         {
             return null;
         }
-
+        if (DesktopMusicFallbackProvider.IsFallbackSessionId(preferredSessionId))
+        {
+            DesktopPlayerSnapshot? fallbackSnapshot = ResolveFallbackSnapshot(preferredSessionId);
+            if (fallbackSnapshot is not null)
+            {
+                return new MusicTimelineSnapshot(fallbackSnapshot.Position, fallbackSnapshot.Duration);
+            }
+        }
         var session = ResolveSession(preferredSessionId);
         AttachCurrentSession(session);
-        if (session is null)
+        if (session is not null)
         {
-            return null;
-        }
-
-        try
-        {
-            var timeline = session.GetTimelineProperties();
-            return new MusicTimelineSnapshot(
-                timeline.Position,
-                timeline.EndTime > timeline.StartTime
+            try
+            {
+                var timeline = session.GetTimelineProperties();
+                TimeSpan position = timeline.Position;
+                TimeSpan duration = timeline.EndTime > timeline.StartTime
                     ? timeline.EndTime - timeline.StartTime
-                    : TimeSpan.Zero);
+                    : TimeSpan.Zero;
+                if (duration <= TimeSpan.Zero)
+                {
+                    DesktopPlayerSnapshot? companion = TryFindCompanionFallbackSnapshot(session.SourceAppUserModelId);
+                    if (companion is not null && companion.Duration > TimeSpan.Zero)
+                    {
+                        duration = companion.Duration;
+                        if (position <= TimeSpan.Zero)
+                        {
+                            position = companion.Position;
+                        }
+                    }
+                }
+                return new MusicTimelineSnapshot(position, duration);
+            }
+            catch (Exception ex)
+            {
+                // The session wrapper can go stale between resolution and this
+                // read (player exit, per-track session churn); callers treat null
+                // as "no update" and the next full refresh or SessionsChanged
+                // reattaches. Throwing here turned into the recurring timeline
+                // NRE spam seen in feedback diagnostics.
+                App.LogVerbose($"[MusicSession] Skipped stale timeline read: {ex.Message}");
+            }
         }
-        catch (Exception ex)
-        {
-            // The session wrapper can go stale between resolution and this
-            // read (player exit, per-track session churn); callers treat null
-            // as "no update" and the next full refresh or SessionsChanged
-            // reattaches. Throwing here turned into the recurring timeline
-            // NRE spam seen in feedback diagnostics.
-            App.LogVerbose($"[MusicSession] Skipped stale timeline read: {ex.Message}");
-            return null;
-        }
+        DesktopPlayerSnapshot? fallback = ResolveFallbackSnapshot(preferredSessionId);
+        return fallback is not null
+            ? new MusicTimelineSnapshot(fallback.Position, fallback.Duration)
+            : null;
     }
-
     public async Task<MusicPlaybackSnapshot?> GetCurrentPlaybackAsync(string? preferredSessionId = null)
     {
         await InitializeAsync();
@@ -202,37 +270,42 @@ public sealed class MusicSessionService : IDisposable
         {
             return null;
         }
-
+        if (DesktopMusicFallbackProvider.IsFallbackSessionId(preferredSessionId))
+        {
+            DesktopPlayerSnapshot? fallbackSnapshot = ResolveFallbackSnapshot(preferredSessionId);
+            if (fallbackSnapshot is not null)
+            {
+                return CreatePlaybackSnapshotFromFallback(fallbackSnapshot);
+            }
+        }
         var session = ResolveSession(preferredSessionId);
         AttachCurrentSession(session);
-        if (session is null)
+        if (session is not null)
         {
-            return null;
+            try
+            {
+                var playbackInfo = session.GetPlaybackInfo();
+                var controls = playbackInfo.Controls;
+                return new MusicPlaybackSnapshot(
+                    MapPlaybackState(playbackInfo.PlaybackStatus),
+                    controls.IsPlayEnabled,
+                    controls.IsPauseEnabled,
+                    controls.IsPreviousEnabled,
+                    controls.IsNextEnabled,
+                    controls.IsPlaybackPositionEnabled,
+                    controls.IsShuffleEnabled,
+                    controls.IsRepeatEnabled,
+                    MapPlaybackMode(playbackInfo));
+            }
+            catch (Exception ex)
+            {
+                // Same stale-session window as the timeline read above.
+                App.LogVerbose($"[MusicSession] Skipped stale playback read: {ex.Message}");
+            }
         }
-
-        try
-        {
-            var playbackInfo = session.GetPlaybackInfo();
-            var controls = playbackInfo.Controls;
-            return new MusicPlaybackSnapshot(
-                MapPlaybackState(playbackInfo.PlaybackStatus),
-                controls.IsPlayEnabled,
-                controls.IsPauseEnabled,
-                controls.IsPreviousEnabled,
-                controls.IsNextEnabled,
-                controls.IsPlaybackPositionEnabled,
-                controls.IsShuffleEnabled,
-                controls.IsRepeatEnabled,
-                MapPlaybackMode(playbackInfo));
-        }
-        catch (Exception ex)
-        {
-            // Same stale-session window as the timeline read above.
-            App.LogVerbose($"[MusicSession] Skipped stale playback read: {ex.Message}");
-            return null;
-        }
+        DesktopPlayerSnapshot? fallback = ResolveFallbackSnapshot(preferredSessionId);
+        return fallback is not null ? CreatePlaybackSnapshotFromFallback(fallback) : null;
     }
-
     public async Task<bool> TrySetPreferredSessionAsync(string sessionId)
     {
         await InitializeAsync();
@@ -240,46 +313,53 @@ public sealed class MusicSessionService : IDisposable
         {
             return false;
         }
-
+        if (DesktopMusicFallbackProvider.IsFallbackSessionId(sessionId))
+        {
+            DesktopPlayerSnapshot? fallback = ResolveFallbackSnapshot(sessionId);
+            if (fallback is not null)
+            {
+                DetachSession(_currentSession);
+                _currentSession = null;
+                return true;
+            }
+            return false;
+        }
         var session = FindSession(sessionId);
         if (session is null)
         {
             return false;
         }
-
         AttachCurrentSession(session);
         return true;
     }
-
     public async Task<bool> TryPlayAsync(string? sessionId)
     {
         return await TryControlAsync(sessionId, "play", session => session.TryPlayAsync());
     }
-
     public async Task<bool> TryPauseAsync(string? sessionId)
     {
         return await TryControlAsync(sessionId, "pause", session => session.TryPauseAsync());
     }
-
     public async Task<bool> TryPreviousAsync(string? sessionId)
     {
         return await TryControlAsync(sessionId, "previous", session => session.TrySkipPreviousAsync());
     }
-
     public async Task<bool> TryNextAsync(string? sessionId)
     {
         return await TryControlAsync(sessionId, "next", session => session.TrySkipNextAsync());
     }
-
     public async Task<bool> TrySeekAsync(string? sessionId, TimeSpan position)
     {
+        if (DesktopMusicFallbackProvider.IsFallbackSessionId(sessionId))
+        {
+            return false;
+        }
         long positionHundredNanoseconds = (long)position.TotalMilliseconds * 10_000;
         return await TryControlAsync(
             sessionId,
             "seek",
             session => session.TryChangePlaybackPositionAsync(positionHundredNanoseconds));
     }
-
     /// <summary>
     /// Media commands target a session whose backing player can vanish at
     /// any moment; the resulting COMException (0x800706BA) surfaced through
@@ -292,12 +372,18 @@ public sealed class MusicSessionService : IDisposable
         string operation,
         Func<GlobalSystemMediaTransportControlsSession, Windows.Foundation.IAsyncOperation<bool>> control)
     {
-        // Resolution itself can race the player's exit, so it shares the
-        // guard instead of running in GetSessionAsync.
         try
         {
+            if (DesktopMusicFallbackProvider.IsFallbackSessionId(sessionId))
+            {
+                return _fallbackProvider.TryControl(sessionId, operation);
+            }
             var session = await GetSessionAsync(sessionId);
-            return session is not null && await control(session);
+            if (session is not null)
+            {
+                return await control(session);
+            }
+            return _fallbackProvider.TryControl(sessionId, operation);
         }
         catch (Exception ex)
         {
@@ -305,9 +391,12 @@ public sealed class MusicSessionService : IDisposable
             return false;
         }
     }
-
     public async Task<bool> TryChangePlaybackModeAsync(string? sessionId, MusicPlaybackMode playbackMode)
     {
+        if (DesktopMusicFallbackProvider.IsFallbackSessionId(sessionId))
+        {
+            return false;
+        }
         try
         {
             var session = await GetSessionAsync(sessionId);
@@ -319,16 +408,13 @@ public sealed class MusicSessionService : IDisposable
             return false;
         }
     }
-
     private static async Task<bool> ApplyPlaybackModeAsync(
         GlobalSystemMediaTransportControlsSession session,
         MusicPlaybackMode playbackMode)
     {
-
         var playbackInfo = session.GetPlaybackInfo();
         var controls = playbackInfo.Controls;
         bool didChange = false;
-
         switch (playbackMode)
         {
             case MusicPlaybackMode.Shuffle:
@@ -336,63 +422,56 @@ public sealed class MusicSessionService : IDisposable
                 {
                     return false;
                 }
-
                 if (controls.IsRepeatEnabled && playbackInfo.AutoRepeatMode != MediaPlaybackAutoRepeatMode.None)
                 {
                     didChange |= await session.TryChangeAutoRepeatModeAsync(MediaPlaybackAutoRepeatMode.None);
                 }
-
                 didChange |= await session.TryChangeShuffleActiveAsync(true);
                 return didChange;
-
             case MusicPlaybackMode.Repeat:
                 if (!controls.IsRepeatEnabled)
                 {
                     return false;
                 }
-
                 if (controls.IsShuffleEnabled && playbackInfo.IsShuffleActive == true)
                 {
                     didChange |= await session.TryChangeShuffleActiveAsync(false);
                 }
-
                 didChange |= await session.TryChangeAutoRepeatModeAsync(MediaPlaybackAutoRepeatMode.List);
                 return didChange;
-
             default:
                 if (controls.IsShuffleEnabled && playbackInfo.IsShuffleActive == true)
                 {
                     didChange |= await session.TryChangeShuffleActiveAsync(false);
                 }
-
                 if (controls.IsRepeatEnabled && playbackInfo.AutoRepeatMode != MediaPlaybackAutoRepeatMode.None)
                 {
                     didChange |= await session.TryChangeAutoRepeatModeAsync(MediaPlaybackAutoRepeatMode.None);
                 }
-
                 return didChange;
         }
     }
-
     public void Dispose()
     {
         if (_isDisposed)
         {
             return;
         }
-
         _isDisposed = true;
+        _fallbackProvider.SessionsChanged -= FallbackProvider_SessionsChanged;
+        _fallbackProvider.PlaybackInfoChanged -= FallbackProvider_PlaybackInfoChanged;
+        _fallbackProvider.MediaPropertiesChanged -= FallbackProvider_MediaPropertiesChanged;
+        _fallbackProvider.TimelinePropertiesChanged -= FallbackProvider_TimelinePropertiesChanged;
+        _fallbackProvider.Dispose();
         if (_manager is not null)
         {
             _manager.SessionsChanged -= Manager_SessionsChanged;
             _manager.CurrentSessionChanged -= Manager_CurrentSessionChanged;
         }
-
         DetachSession(_currentSession);
         _manager = null;
         _currentSession = null;
     }
-
     private async Task<GlobalSystemMediaTransportControlsSession?> GetSessionAsync(string? sessionId)
     {
         await InitializeAsync();
@@ -400,53 +479,177 @@ public sealed class MusicSessionService : IDisposable
         {
             return null;
         }
-
         return ResolveSession(sessionId);
     }
-
     private GlobalSystemMediaTransportControlsSession? ResolveSession(string? preferredSessionId)
     {
         if (!string.IsNullOrWhiteSpace(preferredSessionId))
         {
+            if (DesktopMusicFallbackProvider.IsFallbackSessionId(preferredSessionId))
+            {
+                return null;
+            }
             var preferred = FindSession(preferredSessionId);
             if (preferred is not null)
             {
                 return preferred;
             }
         }
-
         return _manager?.GetCurrentSession() ?? _manager?.GetSessions().FirstOrDefault();
     }
-
     private GlobalSystemMediaTransportControlsSession? FindSession(string sessionId)
     {
         return EnumerateSessionEntries()
             .FirstOrDefault(entry => string.Equals(entry.SessionId, sessionId, StringComparison.Ordinal))
             ?.Session;
     }
-
+    private DesktopPlayerSnapshot? ResolveFallbackSnapshot(string? preferredSessionId)
+    {
+        IReadOnlyList<DesktopPlayerSnapshot> snapshots = _fallbackProvider.GetActivePlayerSnapshots();
+        if (snapshots.Count == 0)
+        {
+            return null;
+        }
+        if (!string.IsNullOrWhiteSpace(preferredSessionId))
+        {
+            DesktopPlayerSnapshot? exact = snapshots.FirstOrDefault(s =>
+                string.Equals(s.SessionId, preferredSessionId, StringComparison.Ordinal));
+            if (exact is not null)
+            {
+                return exact;
+            }
+        }
+        return snapshots
+            .OrderByDescending(s => s.PlaybackState == MusicPlaybackState.Playing)
+            .ThenByDescending(s => !string.IsNullOrWhiteSpace(s.Title))
+            .FirstOrDefault();
+    }
+    private DesktopPlayerSnapshot? TryFindCompanionFallbackSnapshot(string? sourceAppUserModelId)
+    {
+        string displayName = GetSourceDisplayName(sourceAppUserModelId ?? string.Empty);
+        string? playerKey = TryMapToKnownPlayerKey(sourceAppUserModelId ?? string.Empty, displayName);
+        if (playerKey is null)
+        {
+            return null;
+        }
+        return _fallbackProvider.GetActivePlayerSnapshots()
+            .FirstOrDefault(s => string.Equals(s.PlayerKey, playerKey, StringComparison.OrdinalIgnoreCase));
+    }
+    private static MusicSessionInfo CreateInfoFromFallbackSnapshot(DesktopPlayerSnapshot snapshot)
+    {
+        bool isPlaying = snapshot.PlaybackState == MusicPlaybackState.Playing;
+        return new MusicSessionInfo(
+            SessionId: snapshot.SessionId,
+            SourceAppUserModelId: snapshot.SourceAppUserModelId,
+            SourceDisplayName: snapshot.SourceDisplayName,
+            Title: snapshot.Title,
+            Artist: snapshot.Artist,
+            Album: snapshot.Album,
+            PlaybackState: snapshot.PlaybackState,
+            Position: snapshot.Position,
+            Duration: snapshot.Duration,
+            CanPlay: !isPlaying,
+            CanPause: isPlaying,
+            CanGoPrevious: true,
+            CanGoNext: true,
+            CanSeek: false,
+            CanChangeShuffle: false,
+            CanChangeRepeat: false,
+            PlaybackMode: MusicPlaybackMode.Normal,
+            Thumbnail: snapshot.Thumbnail);
+    }
+    private static MusicPlaybackSnapshot CreatePlaybackSnapshotFromFallback(DesktopPlayerSnapshot snapshot)
+    {
+        bool isPlaying = snapshot.PlaybackState == MusicPlaybackState.Playing;
+        return new MusicPlaybackSnapshot(
+            PlaybackState: snapshot.PlaybackState,
+            CanPlay: !isPlaying,
+            CanPause: isPlaying,
+            CanGoPrevious: true,
+            CanGoNext: true,
+            CanSeek: false,
+            CanChangeShuffle: false,
+            CanChangeRepeat: false,
+            PlaybackMode: MusicPlaybackMode.Normal);
+    }
     private async Task<MusicSessionInfo> CreateInfoAsync(GlobalSystemMediaTransportControlsSession session)
     {
         var mediaProperties = await TryGetMediaPropertiesAsync(session);
         var playbackInfo = session.GetPlaybackInfo();
         var timeline = session.GetTimelineProperties();
         var controls = playbackInfo.Controls;
-
         string sourceApp = session.SourceAppUserModelId ?? string.Empty;
+        string displayName = GetSourceDisplayName(sourceApp);
         string title = mediaProperties?.Title ?? string.Empty;
         string artist = mediaProperties?.Artist ?? string.Empty;
         string album = mediaProperties?.AlbumTitle ?? string.Empty;
-
+        TimeSpan position = timeline.Position;
+        TimeSpan duration = timeline.EndTime > timeline.StartTime
+            ? timeline.EndTime - timeline.StartTime
+            : TimeSpan.Zero;
+        IRandomAccessStreamReference? thumbnail = mediaProperties?.Thumbnail;
+        // Hybrid enrichment: When NetEase CloudMusic / QQMusic / KuGou exposes an incomplete
+        // SMTC session (missing title, duration, or thumbnail), supplement it from our desktop probe.
+        string? knownPlayerKey = TryMapToKnownPlayerKey(sourceApp, displayName);
+        if (knownPlayerKey is not null &&
+            (string.IsNullOrWhiteSpace(title) || duration <= TimeSpan.Zero || thumbnail is null))
+        {
+            DesktopPlayerSnapshot? companion = TryFindCompanionFallbackSnapshot(sourceApp);
+            if (companion is not null)
+            {
+                if (string.IsNullOrWhiteSpace(title))
+                {
+                    title = companion.Title;
+                }
+                if (string.IsNullOrWhiteSpace(artist))
+                {
+                    artist = companion.Artist;
+                }
+                if (string.IsNullOrWhiteSpace(album))
+                {
+                    album = companion.Album;
+                }
+                if (duration <= TimeSpan.Zero && companion.Duration > TimeSpan.Zero)
+                {
+                    duration = companion.Duration;
+                    if (position <= TimeSpan.Zero)
+                    {
+                        position = companion.Position;
+                    }
+                }
+                thumbnail ??= companion.Thumbnail;
+            }
+            else if (!string.IsNullOrWhiteSpace(title) && (duration <= TimeSpan.Zero || thumbnail is null))
+            {
+                if (_fallbackProvider.TryGetCachedMetadata(knownPlayerKey, title, artist, out DesktopTrackMetadata? cached) &&
+                    cached is not null)
+                {
+                    if (string.IsNullOrWhiteSpace(album))
+                    {
+                        album = cached.Album;
+                    }
+                    if (duration <= TimeSpan.Zero && cached.Duration > TimeSpan.Zero)
+                    {
+                        duration = cached.Duration;
+                    }
+                    thumbnail ??= DesktopMusicFallbackProvider.CreateStreamReference(cached.CoverBytes);
+                }
+                else
+                {
+                    _ = _fallbackProvider.EnrichMetadataAsync(knownPlayerKey, title, artist);
+                }
+            }
+        }
         return new MusicSessionInfo(
             GetSessionId(session),
             sourceApp,
-            GetSourceDisplayName(sourceApp),
+            displayName,
             title,
             artist,
             album,
             MapPlaybackState(playbackInfo.PlaybackStatus),
-            timeline.Position,
-            timeline.EndTime > timeline.StartTime ? timeline.EndTime - timeline.StartTime : TimeSpan.Zero,
+            position,
+            duration,
             controls.IsPlayEnabled,
             controls.IsPauseEnabled,
             controls.IsPreviousEnabled,
@@ -455,9 +658,8 @@ public sealed class MusicSessionService : IDisposable
             controls.IsShuffleEnabled,
             controls.IsRepeatEnabled,
             MapPlaybackMode(playbackInfo),
-            mediaProperties?.Thumbnail);
+            thumbnail);
     }
-
     private static async Task<GlobalSystemMediaTransportControlsSessionMediaProperties?> TryGetMediaPropertiesAsync(
         GlobalSystemMediaTransportControlsSession session)
     {
@@ -471,17 +673,14 @@ public sealed class MusicSessionService : IDisposable
             return null;
         }
     }
-
     private void AttachCurrentSession(GlobalSystemMediaTransportControlsSession? session)
     {
         if (ReferenceEquals(_currentSession, session))
         {
             return;
         }
-
         DetachSession(_currentSession);
         _currentSession = session;
-
         if (_currentSession is not null)
         {
             _currentSession.PlaybackInfoChanged += Session_PlaybackInfoChanged;
@@ -489,19 +688,16 @@ public sealed class MusicSessionService : IDisposable
             _currentSession.TimelinePropertiesChanged += Session_TimelinePropertiesChanged;
         }
     }
-
     private void DetachSession(GlobalSystemMediaTransportControlsSession? session)
     {
         if (session is null)
         {
             return;
         }
-
         session.PlaybackInfoChanged -= Session_PlaybackInfoChanged;
         session.MediaPropertiesChanged -= Session_MediaPropertiesChanged;
         session.TimelinePropertiesChanged -= Session_TimelinePropertiesChanged;
     }
-
     private void Manager_SessionsChanged(
         GlobalSystemMediaTransportControlsSessionManager sender,
         SessionsChangedEventArgs args)
@@ -510,10 +706,8 @@ public sealed class MusicSessionService : IDisposable
         {
             return;
         }
-
         SessionsChanged?.Invoke(this, EventArgs.Empty);
     }
-
     private void Manager_CurrentSessionChanged(
         GlobalSystemMediaTransportControlsSessionManager sender,
         CurrentSessionChangedEventArgs args)
@@ -522,11 +716,9 @@ public sealed class MusicSessionService : IDisposable
         {
             return;
         }
-
         AttachCurrentSession(sender.GetCurrentSession());
         CurrentSessionChanged?.Invoke(this, EventArgs.Empty);
     }
-
     private void Session_PlaybackInfoChanged(
         GlobalSystemMediaTransportControlsSession sender,
         PlaybackInfoChangedEventArgs args)
@@ -535,10 +727,8 @@ public sealed class MusicSessionService : IDisposable
         {
             return;
         }
-
         PlaybackInfoChanged?.Invoke(this, EventArgs.Empty);
     }
-
     private void Session_MediaPropertiesChanged(
         GlobalSystemMediaTransportControlsSession sender,
         MediaPropertiesChangedEventArgs args)
@@ -547,10 +737,8 @@ public sealed class MusicSessionService : IDisposable
         {
             return;
         }
-
         MediaPropertiesChanged?.Invoke(this, EventArgs.Empty);
     }
-
     private void Session_TimelinePropertiesChanged(
         GlobalSystemMediaTransportControlsSession sender,
         TimelinePropertiesChangedEventArgs args)
@@ -559,10 +747,36 @@ public sealed class MusicSessionService : IDisposable
         {
             return;
         }
-
         TimelinePropertiesChanged?.Invoke(this, EventArgs.Empty);
     }
-
+    private void FallbackProvider_SessionsChanged(object? sender, EventArgs e)
+    {
+        if (!_isDisposed)
+        {
+            SessionsChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+    private void FallbackProvider_PlaybackInfoChanged(object? sender, EventArgs e)
+    {
+        if (!_isDisposed)
+        {
+            PlaybackInfoChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+    private void FallbackProvider_MediaPropertiesChanged(object? sender, EventArgs e)
+    {
+        if (!_isDisposed)
+        {
+            MediaPropertiesChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+    private void FallbackProvider_TimelinePropertiesChanged(object? sender, EventArgs e)
+    {
+        if (!_isDisposed)
+        {
+            TimelinePropertiesChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
     private string GetSessionId(GlobalSystemMediaTransportControlsSession session)
     {
         IReadOnlyList<SessionEntry> entries = EnumerateSessionEntries();
@@ -571,7 +785,6 @@ public sealed class MusicSessionService : IDisposable
         {
             return identityMatch.SessionId;
         }
-
         string sourceApp = session.SourceAppUserModelId ?? string.Empty;
         SessionEntry[] sourceMatches = entries
             .Where(entry => string.Equals(
@@ -583,7 +796,6 @@ public sealed class MusicSessionService : IDisposable
             ? sourceMatches[0].SessionId
             : CreateSessionId(sourceApp, 0);
     }
-
     internal static string CreateSessionId(string sourceAppUserModelId, int sourceOrdinal)
     {
         return string.Concat(
@@ -591,63 +803,77 @@ public sealed class MusicSessionService : IDisposable
             "\u001F",
             Math.Max(0, sourceOrdinal).ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
-
+    internal static string? TryMapToKnownPlayerKey(string sourceAppUserModelId, string displayName)
+    {
+        string lowerApp = (sourceAppUserModelId ?? string.Empty).ToLowerInvariant();
+        if (lowerApp.Contains("cloudmusic", StringComparison.Ordinal) ||
+            lowerApp.Contains("netease", StringComparison.Ordinal) ||
+            string.Equals(displayName, "网易云音乐", StringComparison.OrdinalIgnoreCase))
+        {
+            return "cloudmusic";
+        }
+        if (lowerApp.Contains("qqmusic", StringComparison.Ordinal) ||
+            string.Equals(displayName, "QQ音乐", StringComparison.OrdinalIgnoreCase))
+        {
+            return "qqmusic";
+        }
+        if (lowerApp.Contains("kugou", StringComparison.Ordinal) ||
+            string.Equals(displayName, "酷狗音乐", StringComparison.OrdinalIgnoreCase))
+        {
+            return "kugou";
+        }
+        return null;
+    }
     internal static string GetSourceDisplayName(string sourceAppUserModelId)
     {
         if (string.IsNullOrWhiteSpace(sourceAppUserModelId))
         {
             return string.Empty;
         }
-
         string normalized = sourceAppUserModelId.Trim();
         string lower = normalized.ToLowerInvariant();
         if (lower.Contains("qqmusic", StringComparison.Ordinal))
         {
             return "QQ音乐";
         }
-
         if (lower.Contains("cloudmusic", StringComparison.Ordinal) ||
             lower.Contains("netease", StringComparison.Ordinal))
         {
             return "网易云音乐";
         }
-
+        if (lower.Contains("kugou", StringComparison.Ordinal))
+        {
+            return "酷狗音乐";
+        }
         if (lower.Contains("msedge", StringComparison.Ordinal))
         {
             return "Microsoft Edge";
         }
-
         if (lower.Contains("chrome", StringComparison.Ordinal))
         {
             return "Google Chrome";
         }
-
         if (lower.Contains("firefox", StringComparison.Ordinal))
         {
             return "Mozilla Firefox";
         }
-
         if (lower.Contains("spotify", StringComparison.Ordinal))
         {
             return "Spotify";
         }
-
         if (lower.Contains("zunemusic", StringComparison.Ordinal) ||
             lower.Contains("media.player", StringComparison.Ordinal))
         {
             return "Windows Media Player";
         }
-
         string firstSegment = normalized.Split('!')[0];
         if (firstSegment.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
         {
             return Path.GetFileNameWithoutExtension(firstSegment);
         }
-
         string[] dottedParts = firstSegment.Split('.', StringSplitOptions.RemoveEmptyEntries);
         return dottedParts.Length > 0 ? dottedParts[^1] : firstSegment;
     }
-
     internal static IReadOnlyList<string> DisambiguateSourceDisplayNames(
         IReadOnlyList<string> displayNames)
     {
@@ -656,7 +882,6 @@ public sealed class MusicSessionService : IDisposable
             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
         var ordinals = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var result = new string[displayNames.Count];
-
         for (int index = 0; index < displayNames.Count; index++)
         {
             string displayName = displayNames[index];
@@ -665,22 +890,18 @@ public sealed class MusicSessionService : IDisposable
                 result[index] = displayName;
                 continue;
             }
-
             int ordinal = ordinals.TryGetValue(displayName, out int current) ? current + 1 : 1;
             ordinals[displayName] = ordinal;
             result[index] = $"{displayName} ({ordinal})";
         }
-
         return result;
     }
-
     private IReadOnlyList<SessionEntry> EnumerateSessionEntries()
     {
         if (_manager is null)
         {
             return [];
         }
-
         var sourceOrdinals = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var entries = new List<SessionEntry>();
         foreach (GlobalSystemMediaTransportControlsSession session in _manager.GetSessions())
@@ -692,10 +913,8 @@ public sealed class MusicSessionService : IDisposable
             sourceOrdinals[sourceApp] = ordinal + 1;
             entries.Add(new SessionEntry(CreateSessionId(sourceApp, ordinal), session));
         }
-
         return entries;
     }
-
     private static bool IsSameSession(
         GlobalSystemMediaTransportControlsSession? left,
         GlobalSystemMediaTransportControlsSession? right)
@@ -704,11 +923,9 @@ public sealed class MusicSessionService : IDisposable
             right is not null &&
             (ReferenceEquals(left, right) || left.Equals(right));
     }
-
     private sealed record SessionEntry(
         string SessionId,
         GlobalSystemMediaTransportControlsSession Session);
-
     private static MusicPlaybackState MapPlaybackState(GlobalSystemMediaTransportControlsSessionPlaybackStatus status)
     {
         return status switch
@@ -719,14 +936,12 @@ public sealed class MusicSessionService : IDisposable
             _ => MusicPlaybackState.Unknown
         };
     }
-
     private static MusicPlaybackMode MapPlaybackMode(GlobalSystemMediaTransportControlsSessionPlaybackInfo playbackInfo)
     {
         if (playbackInfo.IsShuffleActive == true)
         {
             return MusicPlaybackMode.Shuffle;
         }
-
         return playbackInfo.AutoRepeatMode == MediaPlaybackAutoRepeatMode.None
             ? MusicPlaybackMode.Normal
             : MusicPlaybackMode.Repeat;
