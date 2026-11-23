@@ -4,6 +4,10 @@
 
 English | [简体中文](README.zh-CN.md)
 
+> **Fork & Secondary Development Notice**
+> - **This Repository**: Secondary development fork maintained by **[@Meco30701X (Meco)](https://github.com/Meco30701X)** (`1756490193@qq.com`), adding zero-config desktop music player detection, artwork/duration enrichment, and playback controls for NetEase CloudMusic, QQMusic, and KuGou Music.
+> - **Upstream Project & Original Author**: Forked from **[Tianyu199509/DeskBox](https://github.com/Tianyu199509/DeskBox)** by **[@Tianyu199509 (Simon)](https://github.com/Tianyu199509)**. Special thanks to the original author!
+
 > External pull requests are not being merged at this time — bug reports, ideas, and discussions are very welcome via Issues / Discussions. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 [![CI](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml/badge.svg)](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml)

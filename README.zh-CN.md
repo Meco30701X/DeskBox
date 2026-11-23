@@ -4,6 +4,10 @@
 
 简体中文 | [English](README.md)
 
+> **二次开发版本说明（Fork Notice）**
+> - **当前仓库**：二次开发版本，由 **[@Meco30701X (Meco)](https://github.com/Meco30701X)**（邮箱：`1756490193@qq.com`）维护，新增了网易云音乐、QQ音乐、酷狗音乐桌面客户端免 SMTC 配置自动识别、专辑封面/时长补全与播放控制等增强功能。
+> - **上游原项目与原作者**：Fork 自 **[Tianyu199509/DeskBox](https://github.com/Tianyu199509/DeskBox)**，原作者 **[@Tianyu199509 (Simon)](https://github.com/Tianyu199509)**。感谢原作者的开源贡献！
+
 > 目前暂不接受外部 PR 合并——欢迎通过 Issue / Discussion 提交 Bug、功能建议与技术讨论，详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 [![CI](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml/badge.svg)](https://github.com/Tianyu199509/DeskBox/actions/workflows/ci.yml)
