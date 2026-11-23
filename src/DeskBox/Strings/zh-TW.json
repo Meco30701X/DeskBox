@@ -491,7 +491,7 @@
   "QuickCapture.Empty.RecentDisabledTitle": "剪貼簿記錄未開啟",
   "Settings.Music.ArtworkBackdrop.Title": "根據封面配色背景",
   "Settings.Music.SmtcNotice.Title": "為什麼有的播放器讀不到歌曲資訊？",
-  "Settings.Music.SmtcNotice.Description": "音樂格子優先使用 Windows 系統媒體工作階段（SMTC）；本二次開發版還內建網易雲音樂、QQ音樂、酷狗音樂桌面用戶端回退識別。未接入 SMTC 或未開放完整控制能力的這三家播放器，仍可自動顯示歌曲資訊，並可使用播放/暫停、上一首、下一首按鈕。\n\n其他播放器仍取決於自身是否接入 SMTC：按音量鍵喚起 Windows 媒體浮視窗，若浮視窗中也沒有該播放器，請在播放器設定中開啟「系統媒體控制」「SMTC」或「媒體鍵整合」。時長、進度條、拖動進度與循環/隨機控制取決於播放器開放的資料與能力；不可用時對應區域會置灰或隱藏。",
+  "Settings.Music.SmtcNotice.Description": "音樂格子優先使用 Windows 系統媒體工作階段（SMTC）；本二次開發版為網易雲音樂內建桌面深度橋接——首次啟用時會自動以本地除錯橋重啟網易雲一次。此後網易雲音樂的進度條、播放/暫停、上一首、下一首與拖動進度均使用播放器真實狀態，不依賴其 SMTC 是否完整。QQ音樂與酷狗音樂使用桌面識別與全域媒體鍵控制；無法讀取真實進度時不再顯示估算進度。\n\n其他播放器仍取決於自身是否接入 SMTC：按音量鍵喚起 Windows 媒體浮視窗，若浮視窗中也沒有該播放器，請在播放器設定中開啟「系統媒體控制」「SMTC」或「媒體鍵整合」。循環/隨機控制取決於播放器開放的能力；不可用時對應按鈕會置灰或隱藏。",
   "Onboarding.Scene.MoveBadge": "移動",
   "Onboarding.Scene.FileName1": "會議記錄.txt",
   "Onboarding.Scene.FileName2": "發票.zip",

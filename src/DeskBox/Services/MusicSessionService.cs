@@ -352,7 +352,7 @@ public sealed class MusicSessionService : IDisposable
     {
         if (DesktopMusicFallbackProvider.IsFallbackSessionId(sessionId))
         {
-            return false;
+            return await Task.Run(() => _fallbackProvider.TrySeek(sessionId, position));
         }
         long positionHundredNanoseconds = (long)position.TotalMilliseconds * 10_000;
         return await TryControlAsync(
@@ -387,6 +387,14 @@ public sealed class MusicSessionService : IDisposable
 
             var playbackInfo = session.GetPlaybackInfo();
             var controls = playbackInfo.Controls;
+            DesktopPlayerSnapshot? companionBeforeControl = TryFindCompanionFallbackSnapshot(session.SourceAppUserModelId);
+            if (companionBeforeControl is { HasRealTimeline: true })
+            {
+                // Deep NetEase integration supplies authoritative state and transport.
+                // Do not let a stale/incomplete SMTC session intercept the button.
+                return await TryFallbackControlForSessionAsync(session, operation);
+            }
+
             if (!IsTransportControlEnabled(
                     controls.IsPlayEnabled,
                     controls.IsPauseEnabled,
@@ -603,7 +611,7 @@ public sealed class MusicSessionService : IDisposable
             CanPause: isPlaying,
             CanGoPrevious: true,
             CanGoNext: true,
-            CanSeek: false,
+            CanSeek: snapshot.HasRealTimeline,
             CanChangeShuffle: false,
             CanChangeRepeat: false,
             PlaybackMode: MusicPlaybackMode.Normal,
@@ -618,7 +626,7 @@ public sealed class MusicSessionService : IDisposable
             CanPause: isPlaying,
             CanGoPrevious: true,
             CanGoNext: true,
-            CanSeek: false,
+            CanSeek: snapshot.HasRealTimeline,
             CanChangeShuffle: false,
             CanChangeRepeat: false,
             PlaybackMode: MusicPlaybackMode.Normal);
@@ -639,6 +647,7 @@ public sealed class MusicSessionService : IDisposable
             ? timeline.EndTime - timeline.StartTime
             : TimeSpan.Zero;
         IRandomAccessStreamReference? thumbnail = mediaProperties?.Thumbnail;
+        MusicPlaybackState playbackState = MapPlaybackState(playbackInfo.PlaybackStatus);
         // Hybrid enrichment: When NetEase CloudMusic / QQMusic / KuGou exposes an incomplete
         // SMTC session (missing metadata, timeline, thumbnail, or transport buttons),
         // supplement it from the desktop probe. The companion is loaded even when metadata
@@ -699,6 +708,11 @@ public sealed class MusicSessionService : IDisposable
         bool canPause = controls.IsPauseEnabled;
         bool canGoPrevious = controls.IsPreviousEnabled;
         bool canGoNext = controls.IsNextEnabled;
+        bool canSeek = controls.IsPlaybackPositionEnabled;
+        if (companion is { HasRealTimeline: true })
+        {
+            canSeek = true;
+        }
         if (companion is not null)
         {
             bool companionIsPlaying = companion.PlaybackState == MusicPlaybackState.Playing;
@@ -715,14 +729,14 @@ public sealed class MusicSessionService : IDisposable
             title,
             artist,
             album,
-            MapPlaybackState(playbackInfo.PlaybackStatus),
+            playbackState,
             position,
             duration,
             canPlay,
             canPause,
             canGoPrevious,
             canGoNext,
-            controls.IsPlaybackPositionEnabled,
+            canSeek,
             controls.IsShuffleEnabled,
             controls.IsRepeatEnabled,
             MapPlaybackMode(playbackInfo),

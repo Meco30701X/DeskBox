@@ -86,6 +86,23 @@ public sealed class MusicSessionServiceOptionTests
                 operation));
     }
 
+    [Theory]
+    [InlineData("00:22 / 04:22", 22, 262)]
+    [InlineData("01:02:03 / 01:04:05", 3723, 3845)]
+    [InlineData("", 0, 0)]
+    [InlineData("bad text", 0, 0)]
+    public void ParseNeteaseProgressText_ReadsRealMiniBarProgress(
+        string progressText,
+        int expectedPositionSeconds,
+        int expectedDurationSeconds)
+    {
+        (TimeSpan position, TimeSpan duration) =
+            DesktopMusicFallbackProvider.ParseNeteaseProgressText(progressText);
+
+        Assert.Equal(TimeSpan.FromSeconds(expectedPositionSeconds), position);
+        Assert.Equal(TimeSpan.FromSeconds(expectedDurationSeconds), duration);
+    }
+
     [Fact]
     public void CreateFallbackSessionId_IsRecognizedAsFallbackSession()
     {
