@@ -948,7 +948,7 @@
   "Settings.Music.Group.Motion.Description": "커버 마우스 오버 등 세부 모션을 제어합니다",
   "Settings.Music.ArtworkBackdrop.Title": "커버 색상 배경",
   "Settings.Music.SmtcNotice.Title": "일부 플레이어의 곡 정보를 읽지 못하는 이유는?",
-  "Settings.Music.SmtcNotice.Description": "음악 위젯은 Windows 시스템 미디어 세션(SMTC)을 통해 재생 정보를 읽고 제어하며, DeskBox는 Windows가 보는 것과 동일한 정보를 봅니다. 일부 플레이어는 기본적으로 시스템 미디어 세션에 참여하지 않으며 이런 플레이어는 읽을 수 없습니다. 확인 방법: 볼륨 키를 눌러 Windows 미디어 플라이아웃을 띄웠을 때 거기에도 해당 플레이어의 곡이 보이지 않으면 시스템 미디어 세션에 연결되지 않은 것입니다. 플레이어 자체 설정에서 관련 스위치를 찾아 켜 주세요(보통 “시스템 미디어 컨트롤”, “SMTC”, “미디어 키 통합” 같은 이름이며, 일부 플레이어는 업데이트 후 스위치가 재설정되기도 합니다).\n\n재생 시간, 진행률 표시줄, 반복/임의 재생 컨트롤은 플레이어가 Windows에 제공하는 데이터와 기능에 따라 결정되며, 플레이어가 제공하지 않으면 해당 영역이 비어 있거나 일시적으로 사용할 수 없습니다.",
+  "Settings.Music.SmtcNotice.Description": "음악 위젯은 먼저 Windows 시스템 미디어 세션(SMTC)을 사용합니다. 이 2차 개발 빌드는 NetEase CloudMusic, QQMusic, KuGou Music 데스크톱 클라이언트용 폴백 감지도 포함합니다. 이 플레이어가 SMTC에 참여하지 않거나 전체 컨트롤을 노출하지 않아도 트랙 정보가 표시되고 재생/일시정지, 이전 곡, 다음 곡을 사용할 수 있습니다.\n\n다른 플레이어는 여전히 SMTC 연동에 따라 달라집니다. 볼륨 키로 Windows 미디어 플라이아웃을 열었을 때 해당 플레이어가 없으면 플레이어 설정에서 \"시스템 미디어 컨트롤\", \"SMTC\" 또는 \"미디어 키 통합\"을 켜세요. 길이, 진행률, 탐색, 반복, 셔플은 각 플레이어가 노출하는 데이터와 컨트롤에 따라 결정되며, 지원되지 않는 영역은 비활성화되거나 숨겨집니다.",
   "Settings.Music.ArtworkBackdrop.Description": "재생 중 커버에서 색을 추출하여 가벼운 반투명 배경을 만듭니다",
   "Settings.Music.CoverHoverMotion.Title": "커버 마우스 오버 효과",
   "Settings.Music.HideTimeline.Title": "빈 진행률 표시줄 숨기기",

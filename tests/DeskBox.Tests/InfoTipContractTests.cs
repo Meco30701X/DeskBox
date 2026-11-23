@@ -125,31 +125,27 @@ public sealed class InfoTipContractTests
     }
 
     [Fact]
-    public void SmtcNoticeCopy_StaysGlobal_NoNamedPlayers()
+    public void SmtcNoticeCopy_DocumentsDesktopFallbackPlayers()
     {
-        // The banner copy must never name regional players: DeskBox ships
-        // worldwide and every market uses different software.
-        string[] banned =
-        [
-            "NetEase",
-            "网易云",
-            "網易雲",
-            "QQ音乐",
-            "QQ音樂",
-            "QQ Music",
-        ];
-
+        // This fork intentionally documents the three built-in desktop fallbacks.
+        // Global players still receive the generic SMTC guidance below.
         foreach (string locale in EnumerateLocales())
         {
             string json = ReadRepositoryFile($"src/DeskBox/Strings/{locale}.json");
-            int start = json.IndexOf("\"Settings.Music.SmtcNotice.Title\"", StringComparison.Ordinal);
+            int start = json.IndexOf("Settings.Music.SmtcNotice.Title", StringComparison.Ordinal);
             Assert.True(start >= 0, $"{locale}: SmtcNotice.Title missing");
-            int descriptionAt = json.IndexOf("\"Settings.Music.SmtcNotice.Description\"", StringComparison.Ordinal);
+            int descriptionAt = json.IndexOf("Settings.Music.SmtcNotice.Description", StringComparison.Ordinal);
             Assert.True(descriptionAt > start, $"{locale}: SmtcNotice.Description missing");
-            string segment = json.Substring(start, descriptionAt - start + 2500);
-            foreach (string needle in banned)
+            string segment = json.Substring(start, descriptionAt - start + 3000);
+            string[] playerMentions = locale switch
             {
-                Assert.DoesNotContain(needle, segment, StringComparison.Ordinal);
+                "zh-CN" => ["网易云", "QQ音乐", "酷狗音乐"],
+                "zh-TW" => ["網易雲", "QQ音樂", "酷狗音樂"],
+                _ => ["NetEase CloudMusic", "QQMusic", "KuGou Music"]
+            };
+            foreach (string needle in playerMentions.Append("SMTC"))
+            {
+                Assert.Contains(needle, segment, StringComparison.Ordinal);
             }
         }
     }

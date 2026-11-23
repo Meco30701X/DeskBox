@@ -376,20 +376,71 @@ public sealed class MusicSessionService : IDisposable
         {
             if (DesktopMusicFallbackProvider.IsFallbackSessionId(sessionId))
             {
-                return _fallbackProvider.TryControl(sessionId, operation);
+                return await Task.Run(() => _fallbackProvider.TryControl(sessionId, operation));
             }
+
             var session = await GetSessionAsync(sessionId);
-            if (session is not null)
+            if (session is null)
             {
-                return await control(session);
+                return await Task.Run(() => _fallbackProvider.TryControl(sessionId, operation));
             }
-            return _fallbackProvider.TryControl(sessionId, operation);
+
+            var playbackInfo = session.GetPlaybackInfo();
+            var controls = playbackInfo.Controls;
+            if (!IsTransportControlEnabled(
+                    controls.IsPlayEnabled,
+                    controls.IsPauseEnabled,
+                    controls.IsPreviousEnabled,
+                    controls.IsNextEnabled,
+                    operation))
+            {
+                return await TryFallbackControlForSessionAsync(session, operation);
+            }
+
+            if (await control(session))
+            {
+                return true;
+            }
+
+            // Some Chinese desktop players publish metadata through SMTC but reject every
+            // transport command. Route the rejected button to the desktop fallback.
+            return await TryFallbackControlForSessionAsync(session, operation);
         }
         catch (Exception ex)
         {
             App.LogVerbose($"[MusicSession] Skipped stale control '{operation}': {ex.Message}");
             return false;
         }
+    }
+
+    internal static bool IsTransportControlEnabled(
+        bool canPlay,
+        bool canPause,
+        bool canGoPrevious,
+        bool canGoNext,
+        string operation)
+    {
+        return operation switch
+        {
+            "play" => canPlay,
+            "pause" => canPause,
+            "previous" => canGoPrevious,
+            "next" => canGoNext,
+            _ => false
+        };
+    }
+
+    private Task<bool> TryFallbackControlForSessionAsync(
+        GlobalSystemMediaTransportControlsSession session,
+        string operation)
+    {
+        DesktopPlayerSnapshot? companion = TryFindCompanionFallbackSnapshot(session.SourceAppUserModelId);
+        if (companion is null)
+        {
+            return Task.FromResult(false);
+        }
+
+        return Task.Run(() => _fallbackProvider.TryControl(companion.SessionId, operation));
     }
     public async Task<bool> TryChangePlaybackModeAsync(string? sessionId, MusicPlaybackMode playbackMode)
     {
@@ -589,12 +640,16 @@ public sealed class MusicSessionService : IDisposable
             : TimeSpan.Zero;
         IRandomAccessStreamReference? thumbnail = mediaProperties?.Thumbnail;
         // Hybrid enrichment: When NetEase CloudMusic / QQMusic / KuGou exposes an incomplete
-        // SMTC session (missing title, duration, or thumbnail), supplement it from our desktop probe.
+        // SMTC session (missing metadata, timeline, thumbnail, or transport buttons),
+        // supplement it from the desktop probe. The companion is loaded even when metadata
+        // is complete because some player versions publish metadata but disable all controls.
         string? knownPlayerKey = TryMapToKnownPlayerKey(sourceApp, displayName);
+        DesktopPlayerSnapshot? companion = knownPlayerKey is null
+            ? null
+            : TryFindCompanionFallbackSnapshot(sourceApp);
         if (knownPlayerKey is not null &&
             (string.IsNullOrWhiteSpace(title) || duration <= TimeSpan.Zero || thumbnail is null))
         {
-            DesktopPlayerSnapshot? companion = TryFindCompanionFallbackSnapshot(sourceApp);
             if (companion is not null)
             {
                 if (string.IsNullOrWhiteSpace(title))
@@ -640,6 +695,19 @@ public sealed class MusicSessionService : IDisposable
                 }
             }
         }
+        bool canPlay = controls.IsPlayEnabled;
+        bool canPause = controls.IsPauseEnabled;
+        bool canGoPrevious = controls.IsPreviousEnabled;
+        bool canGoNext = controls.IsNextEnabled;
+        if (companion is not null)
+        {
+            bool companionIsPlaying = companion.PlaybackState == MusicPlaybackState.Playing;
+            canPlay |= !companionIsPlaying;
+            canPause |= companionIsPlaying;
+            canGoPrevious = true;
+            canGoNext = true;
+        }
+
         return new MusicSessionInfo(
             GetSessionId(session),
             sourceApp,
@@ -650,10 +718,10 @@ public sealed class MusicSessionService : IDisposable
             MapPlaybackState(playbackInfo.PlaybackStatus),
             position,
             duration,
-            controls.IsPlayEnabled,
-            controls.IsPauseEnabled,
-            controls.IsPreviousEnabled,
-            controls.IsNextEnabled,
+            canPlay,
+            canPause,
+            canGoPrevious,
+            canGoNext,
             controls.IsPlaybackPositionEnabled,
             controls.IsShuffleEnabled,
             controls.IsRepeatEnabled,

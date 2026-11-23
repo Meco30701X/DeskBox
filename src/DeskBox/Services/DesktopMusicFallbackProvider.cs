@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using DeskBox.Platform;
 using Windows.Storage.Streams;
 namespace DeskBox.Services;
 internal sealed record DesktopPlayerDefinition(
@@ -272,10 +273,10 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
             return false;
         }
         bool sentToWindow = false;
-        if (target.WindowHandle != 0 && IsWindow(target.WindowHandle))
+        if (target.WindowHandle != 0 && DesktopMusicNativeMethods.IsWindow(target.WindowHandle))
         {
             nint lParam = (nint)(appCommand << 16);
-            sentToWindow = PostMessageW(target.WindowHandle, WmAppCommand, target.WindowHandle, lParam);
+            sentToWindow = DesktopMusicNativeMethods.PostMessageW(target.WindowHandle, WmAppCommand, target.WindowHandle, lParam);
         }
         if (!sentToWindow && virtualKey != 0)
         {
@@ -489,9 +490,9 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         DesktopPlayerDefinition definition)
     {
         var candidates = new List<WindowCandidate>();
-        EnumWindows((hWnd, _) =>
+        DesktopMusicNativeMethods.EnumWindows((hWnd, _) =>
         {
-            GetWindowThreadProcessId(hWnd, out uint pid);
+            DesktopMusicNativeMethods.GetWindowThreadProcessId(hWnd, out uint pid);
             if (!targetPids.Contains(pid))
             {
                 return true;
@@ -528,7 +529,7 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         {
             score += 100;
         }
-        if (IsWindowVisible(hWnd))
+        if (DesktopMusicNativeMethods.IsWindowVisible(hWnd))
         {
             score += 20;
         }
@@ -933,7 +934,7 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
     }
     private static string GetWindowTitle(nint hWnd)
     {
-        int length = GetWindowTextLengthW(hWnd);
+        int length = DesktopMusicNativeMethods.GetWindowTextLengthW(hWnd);
         if (length <= 0)
         {
             return string.Empty;
@@ -943,7 +944,7 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         {
             fixed (char* ptr = buffer)
             {
-                int copied = GetWindowTextW(hWnd, ptr, buffer.Length);
+                int copied = DesktopMusicNativeMethods.GetWindowTextW(hWnd, ptr, buffer.Length);
                 return copied > 0 ? new string(buffer, 0, copied) : string.Empty;
             }
         }
@@ -955,7 +956,7 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         {
             fixed (char* ptr = buffer)
             {
-                int copied = GetClassNameW(hWnd, ptr, buffer.Length);
+                int copied = DesktopMusicNativeMethods.GetClassNameW(hWnd, ptr, buffer.Length);
                 return copied > 0 ? new string(buffer, 0, copied) : string.Empty;
             }
         }
@@ -964,8 +965,8 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
     {
         try
         {
-            keybd_event(virtualKey, 0, KeyeventfExtendedKey, 0);
-            keybd_event(virtualKey, 0, KeyeventfExtendedKey | KeyeventfKeyUp, 0);
+            DesktopMusicNativeMethods.keybd_event(virtualKey, 0, KeyeventfExtendedKey, 0);
+            DesktopMusicNativeMethods.keybd_event(virtualKey, 0, KeyeventfExtendedKey | KeyeventfKeyUp, 0);
         }
         catch
         {
@@ -1037,29 +1038,6 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         string ClassName,
         string Title,
         int Score);
-    private delegate bool EnumWindowsProc(nint hWnd, nint lParam);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, nint lParam);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint lpdwProcessId);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    private static extern int GetWindowTextLengthW(nint hWnd);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    private static extern unsafe int GetWindowTextW(nint hWnd, char* lpString, int nMaxCount);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    private static extern unsafe int GetClassNameW(nint hWnd, char* lpClassName, int nMaxCount);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsWindowVisible(nint hWnd);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsWindow(nint hWnd);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostMessageW(nint hWnd, int Msg, nint wParam, nint lParam);
-    [DllImport("user32.dll", ExactSpelling = true)]
-    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, nuint dwExtraInfo);
     private enum EDataFlow
     {
         eRender = 0,

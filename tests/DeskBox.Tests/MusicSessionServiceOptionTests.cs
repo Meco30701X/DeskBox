@@ -61,6 +61,31 @@ public sealed class MusicSessionServiceOptionTests
         Assert.Equal(expectedTitle, title);
         Assert.Equal(expectedArtist, artist);
     }
+    [Theory]
+    [InlineData(true, false, false, false, "play", true)]
+    [InlineData(false, true, false, false, "pause", true)]
+    [InlineData(false, false, true, false, "previous", true)]
+    [InlineData(false, false, false, true, "next", true)]
+    [InlineData(false, false, false, false, "play", false)]
+    [InlineData(true, true, true, true, "seek", false)]
+    public void IsTransportControlEnabled_OnlyAcceptsMatchingTransportCapability(
+        bool canPlay,
+        bool canPause,
+        bool canGoPrevious,
+        bool canGoNext,
+        string operation,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            MusicSessionService.IsTransportControlEnabled(
+                canPlay,
+                canPause,
+                canGoPrevious,
+                canGoNext,
+                operation));
+    }
+
     [Fact]
     public void CreateFallbackSessionId_IsRecognizedAsFallbackSession()
     {
