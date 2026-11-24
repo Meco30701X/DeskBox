@@ -6,6 +6,7 @@ English | [简体中文](README.zh-CN.md)
 
 > **Fork & Secondary Development Notice**
 > - **This Repository**: Secondary development fork maintained by **[@Meco30701X (Meco)](https://github.com/Meco30701X)** (`1756490193@qq.com`), adding zero-config desktop music player detection, artwork/duration enrichment, and playback controls for NetEase CloudMusic, QQMusic, and KuGou Music.
+> - **NetEase CloudMusic Deep Bridge**: the Music widget reads track info, exact position, and playback mode straight from NetEase over a local debugging bridge and drives play/pause, previous/next, seeking, and repeat/shuffle directly (NetEase is restarted once with the bridge on first use), independent of incomplete SMTC data. QQMusic and KuGou Music use desktop detection and global media keys.
 > - **Upstream Project & Original Author**: Forked from **[Tianyu199509/DeskBox](https://github.com/Tianyu199509/DeskBox)** by **[@Tianyu199509 (Simon)](https://github.com/Tianyu199509)**. Special thanks to the original author!
 
 > External pull requests are not being merged at this time — bug reports, ideas, and discussions are very welcome via Issues / Discussions. See [CONTRIBUTING.md](CONTRIBUTING.md).

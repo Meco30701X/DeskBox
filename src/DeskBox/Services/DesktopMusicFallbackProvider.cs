@@ -27,6 +27,8 @@ internal sealed record DesktopPlayerSnapshot(
     TimeSpan Position,
     TimeSpan Duration,
     bool HasRealTimeline,
+    bool CanChangePlaybackMode,
+    MusicPlaybackMode PlaybackMode,
     IRandomAccessStreamReference? Thumbnail);
 internal sealed record DesktopTrackMetadata(
     string Title,
@@ -50,6 +52,8 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
     private const uint KeyeventfKeyUp = 0x0002;
     private const uint ClsctxAll = 23;
     private const float AudioPeakActiveThreshold = 0.0005f;
+    private const int MaxCachedCovers = 64;
+    private static readonly TimeSpan NeteaseSnapshotStaleLimit = TimeSpan.FromSeconds(3);
     internal static readonly IReadOnlyList<DesktopPlayerDefinition> SupportedPlayers =
     [
         new DesktopPlayerDefinition(
@@ -77,11 +81,14 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
     private static readonly HttpClient s_httpClient = CreateHttpClient();
     private readonly ConcurrentDictionary<string, DesktopTrackMetadata?> _metadataCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task<DesktopTrackMetadata?>> _inflightMetadataQueries = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte[]?> _coverBytesCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Task<byte[]?>> _inflightCoverDownloads = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<uint, AudioActivityTracker> _audioActivityTrackers = new();
     private readonly NeteaseCloudMusicCdpClient _neteaseCdpClient = new();
     private readonly object _pollGate = new();
     private Timer? _pollTimer;
     private NeteaseCdpPlaybackSnapshot? _neteaseCdpSnapshot;
+    private long _neteaseCdpSnapshotUpdatedAtTicks;
     private string _lastObservedSignature = string.Empty;
     private string _lastObservedTimelineSignature = string.Empty;
     private int _pollRunning;
@@ -262,9 +269,27 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
 
         if (string.Equals(target.PlayerKey, "cloudmusic", StringComparison.Ordinal))
         {
-            if (_neteaseCdpClient.TryControlAsync(operation).GetAwaiter().GetResult())
+            // The NetEase play button is a toggle while the tile issues idempotent play/pause commands:
+            // clicking when the requested state is already active would reverse it.
+            NeteaseCdpPlaybackSnapshot? live = _neteaseCdpSnapshot;
+            if (live is not null &&
+                ((operation == "play" && live.IsPlaying) || (operation == "pause" && !live.IsPlaying)))
             {
                 return true;
+            }
+
+            if (_neteaseCdpClient.TryControlAsync(operation).GetAwaiter().GetResult())
+            {
+                RefreshNeteaseSnapshot();
+                return true;
+            }
+
+            if (live is not null)
+            {
+                // The bridge is up, so the click was either rejected by the page or its reply was lost
+                // in one of NetEase's periodic socket drops. Firing a global media-key toggle on top
+                // could reverse a click that did land; the next poll reports the real state instead.
+                return false;
             }
         }
 
@@ -290,14 +315,16 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
 
     public bool TrySeek(string? sessionId, TimeSpan position)
     {
-        if (!DesktopMusicFallbackProvider.IsFallbackSessionId(sessionId))
-        {
-            return false;
-        }
-
         IReadOnlyList<DesktopPlayerSnapshot> snapshots = GetActivePlayerSnapshots();
-        DesktopPlayerSnapshot? target = snapshots.FirstOrDefault(s =>
-            string.Equals(s.SessionId, sessionId, StringComparison.Ordinal));
+        DesktopPlayerSnapshot? target = null;
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            target = snapshots.FirstOrDefault(s =>
+                string.Equals(s.SessionId, sessionId, StringComparison.Ordinal));
+        }
+        target ??= snapshots.FirstOrDefault(s =>
+            string.Equals(s.PlayerKey, "cloudmusic", StringComparison.Ordinal));
+
         if (target is null ||
             !string.Equals(target.PlayerKey, "cloudmusic", StringComparison.Ordinal) ||
             !target.HasRealTimeline)
@@ -305,7 +332,47 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
             return false;
         }
 
-        return _neteaseCdpClient.TrySeekAsync(position).GetAwaiter().GetResult();
+        bool didSeek = _neteaseCdpClient.TrySeekAsync(position).GetAwaiter().GetResult();
+        if (didSeek)
+        {
+            RefreshNeteaseSnapshot();
+            _neteaseCdpSnapshot = _neteaseCdpSnapshot is not null
+                ? _neteaseCdpSnapshot with { Position = position }
+                : null;
+        }
+
+        return didSeek;
+    }
+
+    public bool TryChangePlaybackMode(string? sessionId, MusicPlaybackMode playbackMode)
+    {
+        IReadOnlyList<DesktopPlayerSnapshot> snapshots = GetActivePlayerSnapshots();
+        DesktopPlayerSnapshot? target = null;
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            target = snapshots.FirstOrDefault(s =>
+                string.Equals(s.SessionId, sessionId, StringComparison.Ordinal));
+        }
+        target ??= snapshots.FirstOrDefault(s =>
+            string.Equals(s.PlayerKey, "cloudmusic", StringComparison.Ordinal));
+
+        if (target is null ||
+            !string.Equals(target.PlayerKey, "cloudmusic", StringComparison.Ordinal) ||
+            !target.CanChangePlaybackMode)
+        {
+            return false;
+        }
+
+        bool didChange = _neteaseCdpClient.TryChangePlaybackModeAsync(playbackMode).GetAwaiter().GetResult();
+        if (didChange)
+        {
+            RefreshNeteaseSnapshot();
+            _neteaseCdpSnapshot = _neteaseCdpSnapshot is not null
+                ? _neteaseCdpSnapshot with { PlaybackMode = playbackMode }
+                : null;
+        }
+
+        return didChange;
     }
 
     internal static IRandomAccessStreamReference? CreateStreamReference(byte[]? bytes)
@@ -341,7 +408,7 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         try
         {
             await EnsureNeteaseCdpBridgeAsync();
-            _neteaseCdpSnapshot = await _neteaseCdpClient.TryGetSnapshotAsync();
+            ApplyNeteaseSnapshot(await _neteaseCdpClient.TryGetSnapshotAsync());
 
             IReadOnlyList<DesktopPlayerSnapshot> snapshots = GetActivePlayerSnapshots();
             string signature = BuildSnapshotsSignature(snapshots);
@@ -383,6 +450,34 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         }
     }
 
+    private void RefreshNeteaseSnapshot()
+    {
+        ApplyNeteaseSnapshot(_neteaseCdpClient.TryGetSnapshotAsync().GetAwaiter().GetResult());
+    }
+
+    /// <summary>
+    /// A single read can fail transiently (the page is busy or re-rendering its bar). Dropping to "no
+    /// timeline" for one poll makes the tile jump to position 0 and disables its buttons, so the last
+    /// good read is kept for a short grace period and only abandoned when reads keep failing.
+    /// </summary>
+    private void ApplyNeteaseSnapshot(NeteaseCdpPlaybackSnapshot? fresh)
+    {
+        long now = DateTimeOffset.UtcNow.Ticks;
+        if (fresh is not null)
+        {
+            _neteaseCdpSnapshot = fresh;
+            Interlocked.Exchange(ref _neteaseCdpSnapshotUpdatedAtTicks, now);
+            return;
+        }
+
+        long updatedAt = Interlocked.Read(ref _neteaseCdpSnapshotUpdatedAtTicks);
+        if (_neteaseCdpSnapshot is not null &&
+            TimeSpan.FromTicks(now - updatedAt) > NeteaseSnapshotStaleLimit)
+        {
+            _neteaseCdpSnapshot = null;
+        }
+    }
+
     private async Task EnsureNeteaseCdpBridgeAsync()
     {
         if (_isDisposed || _neteaseCdpClient.IsConnected)
@@ -390,9 +485,23 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
             return;
         }
 
-        if (await _neteaseCdpClient.TryGetSnapshotAsync() is not null)
+        // Only restart NetEase when it is running without the bridge port. A failed snapshot read on an
+        // already-bridged instance (transient timeout, busy page, track change) must never kill the player.
+        if (await NeteaseCloudMusicCdpClient.IsBridgeEndpointOpenAsync())
         {
             return;
+        }
+
+        try
+        {
+            if (Process.GetProcessesByName("cloudmusic").Length == 0)
+            {
+                _neteaseBridgeRestartAttempted = false;
+                return;
+            }
+        }
+        catch
+        {
         }
 
         if (_neteaseBridgeRestartAttempted)
@@ -412,6 +521,7 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
 
         if (processes.Length == 0)
         {
+            _neteaseBridgeRestartAttempted = false;
             return;
         }
 
@@ -499,7 +609,7 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         return string.Join(
             "|",
             snapshots.Select(s =>
-                $"{s.SessionId}:{s.PlaybackState}:{s.Title}:{s.Artist}:{s.Duration.TotalSeconds:F0}:{(s.Thumbnail is not null ? 1 : 0)}"));
+                $"{s.SessionId}:{s.PlaybackState}:{s.PlaybackMode}:{s.Title}:{s.Artist}:{s.Duration.TotalSeconds:F0}:{(s.Thumbnail is not null ? 1 : 0)}"));
     }
 
     private static string BuildTimelineSignature(IReadOnlyList<DesktopPlayerSnapshot> snapshots)
@@ -598,6 +708,26 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         WindowCandidate? bestWindow = FindBestPlayerWindow(matchingPids, definition);
         string rawWindowTitle = bestWindow?.Title ?? string.Empty;
         (string parsedTitle, string parsedArtist) = ParseWindowTitle(rawWindowTitle, definition);
+
+        NeteaseCdpPlaybackSnapshot? cdpSnapshot =
+            string.Equals(definition.PlayerKey, "cloudmusic", StringComparison.Ordinal)
+                ? _neteaseCdpSnapshot
+                : null;
+
+        // When NetEase is paused or just restarted, the window title stays "网易云音乐".
+        // Always prefer the authoritative title & artist read directly from the NetEase mini-bar DOM/React state.
+        if (cdpSnapshot is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(cdpSnapshot.Title))
+            {
+                parsedTitle = cdpSnapshot.Title;
+            }
+            if (!string.IsNullOrWhiteSpace(cdpSnapshot.Artist))
+            {
+                parsedArtist = cdpSnapshot.Artist;
+            }
+        }
+
         DesktopTrackMetadata? localMetadata = null;
         if (string.Equals(definition.PlayerKey, "cloudmusic", StringComparison.Ordinal))
         {
@@ -611,24 +741,45 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
 
         MusicPlaybackState playbackState = ResolvePlaybackState(matchingPids, audioStates, parsedTitle);
         string sessionId = CreateFallbackSessionId(definition.SourceAppUserModelId, 0);
-        string album = localMetadata?.Album ?? string.Empty;
+        string album = !string.IsNullOrWhiteSpace(cdpSnapshot?.Album)
+            ? cdpSnapshot.Album
+            : (localMetadata?.Album ?? string.Empty);
         TimeSpan duration = localMetadata?.Duration ?? TimeSpan.Zero;
         TimeSpan position = TimeSpan.Zero;
         bool hasRealTimeline = false;
+        bool canChangePlaybackMode = false;
+        MusicPlaybackMode playbackMode = MusicPlaybackMode.Normal;
         byte[]? coverBytes = localMetadata?.CoverBytes;
 
-        NeteaseCdpPlaybackSnapshot? cdpSnapshot =
-            string.Equals(definition.PlayerKey, "cloudmusic", StringComparison.Ordinal)
-                ? _neteaseCdpSnapshot
-                : null;
         if (cdpSnapshot is not null)
         {
             playbackState = cdpSnapshot.IsPlaying
                 ? MusicPlaybackState.Playing
                 : MusicPlaybackState.Paused;
             position = cdpSnapshot.Position;
-            duration = cdpSnapshot.Duration;
-            hasRealTimeline = true;
+            if (cdpSnapshot.Duration > TimeSpan.Zero)
+            {
+                duration = cdpSnapshot.Duration;
+            }
+            hasRealTimeline = duration > TimeSpan.Zero;
+            canChangePlaybackMode = true;
+            playbackMode = cdpSnapshot.PlaybackMode;
+
+            if (!string.IsNullOrWhiteSpace(cdpSnapshot.CoverUrl))
+            {
+                string sizedCoverUrl = cdpSnapshot.CoverUrl.Contains('?', StringComparison.Ordinal)
+                    ? cdpSnapshot.CoverUrl
+                    : $"{cdpSnapshot.CoverUrl}?param=256y256";
+                if (_coverBytesCache.TryGetValue(sizedCoverUrl, out byte[]? directCover))
+                {
+                    // An empty entry records a failed download so it is not retried on every poll.
+                    coverBytes ??= directCover is { Length: > 0 } ? directCover : null;
+                }
+                else
+                {
+                    _ = DownloadAndNotifyCoverAsync(sizedCoverUrl);
+                }
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(parsedTitle))
@@ -646,7 +797,7 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
                 }
                 coverBytes ??= cached.CoverBytes;
             }
-            else
+            else if (coverBytes is null || duration <= TimeSpan.Zero)
             {
                 _ = EnrichAndNotifyAsync(definition.PlayerKey, parsedTitle, parsedArtist);
             }
@@ -667,7 +818,52 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
             Position: position,
             Duration: duration,
             HasRealTimeline: hasRealTimeline,
+            CanChangePlaybackMode: canChangePlaybackMode,
+            PlaybackMode: playbackMode,
             Thumbnail: CreateStreamReference(coverBytes));
+    }
+
+    private async Task DownloadAndNotifyCoverAsync(string coverUrl)
+    {
+        if (_isDisposed || string.IsNullOrWhiteSpace(coverUrl))
+        {
+            return;
+        }
+
+        Task<byte[]?> downloadTask = _inflightCoverDownloads.GetOrAdd(
+            coverUrl,
+            url => TryDownloadCoverBytesAsync(url));
+
+        try
+        {
+            byte[]? bytes = await downloadTask;
+            _coverBytesCache[coverUrl] = bytes is { Length: > 0 } ? bytes : Array.Empty<byte>();
+            TrimCoverCache();
+            if (bytes is { Length: > 0 } && !_isDisposed)
+            {
+                MediaPropertiesChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+        finally
+        {
+            _inflightCoverDownloads.TryRemove(coverUrl, out _);
+        }
+    }
+
+    private void TrimCoverCache()
+    {
+        // One entry is added per played track (including failures), so bound the cache
+        // for long-running sessions. Evicted tracks are simply downloaded again if they return.
+        if (_coverBytesCache.Count <= MaxCachedCovers)
+        {
+            return;
+        }
+
+        int evict = Math.Max(1, _coverBytesCache.Count - (MaxCachedCovers / 2));
+        foreach (string key in _coverBytesCache.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).Take(evict))
+        {
+            _coverBytesCache.TryRemove(key, out _);
+        }
     }
 
     private static MusicPlaybackState ResolvePlaybackState(
