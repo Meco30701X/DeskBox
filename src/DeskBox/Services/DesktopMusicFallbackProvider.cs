@@ -340,6 +340,10 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
                 ? _neteaseCdpSnapshot with { Position = position }
                 : null;
         }
+        else
+        {
+            LogNeteaseControlFailure($"seek to {position.TotalSeconds:F1}s");
+        }
 
         return didSeek;
     }
@@ -370,6 +374,10 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
             _neteaseCdpSnapshot = _neteaseCdpSnapshot is not null
                 ? _neteaseCdpSnapshot with { PlaybackMode = playbackMode }
                 : null;
+        }
+        else
+        {
+            LogNeteaseControlFailure($"switch mode to {playbackMode}");
         }
 
         return didChange;
@@ -448,6 +456,16 @@ internal sealed class DesktopMusicFallbackProvider : IDisposable
         {
             Volatile.Write(ref _pollRunning, 0);
         }
+    }
+
+    // NetEase exposes no diagnostics of its own, so a failed control leaves the bridge's own trail
+    // in the application log instead of failing silently.
+    private void LogNeteaseControlFailure(string action)
+    {
+        IReadOnlyList<string> reasons = _neteaseCdpClient.DrainFailureLog();
+        App.Log(reasons.Count == 0
+            ? $"[DesktopMusicFallback] NetEase {action} failed without a bridge diagnosis."
+            : $"[DesktopMusicFallback] NetEase {action} failed: {string.Join(" | ", reasons.TakeLast(2))}");
     }
 
     private void RefreshNeteaseSnapshot()

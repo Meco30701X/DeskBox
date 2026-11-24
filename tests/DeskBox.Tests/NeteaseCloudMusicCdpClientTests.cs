@@ -115,4 +115,45 @@ public sealed class NeteaseCloudMusicCdpClientTests
         Assert.Contains("type: 'playing/switchPlayingMode'", expression, StringComparison.Ordinal);
         Assert.Contains("playingMode: '" + targetMode + "'", expression, StringComparison.Ordinal);
     }
+    [Fact]
+    public void BuildSeekExpression_DispatchesThroughEveryAnchor()
+    {
+        string expression = NeteaseCloudMusicCdpClient.BuildSeekExpression("119.9");
+
+        Assert.Contains("type: 'playing/setPlayingPosition'", expression, StringComparison.Ordinal);
+        Assert.Contains("payload: { duration: 119.9 }", expression, StringComparison.Ordinal);
+        foreach (string anchor in new[] { "#page_pc_mini_bar", "[data-testid='tid_playbar_play_btn']" })
+        {
+            Assert.Contains(anchor, expression, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Client_NeverInjectsSyntheticMouseInputIntoNetEase()
+    {
+        // A press or drag sent at computed coordinates lands on whatever NetEase shows at that moment.
+        // It was observed clicking through links out of the app, so the client must stay free of it.
+        string source = ReadProductionSource("Services/NeteaseCloudMusicCdpClient.cs");
+
+        Assert.DoesNotContain("Input.dispatch", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("dispatchMouseEvent", source, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("dispatchKeyEvent", source, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ReadProductionSource(string relativePath)
+    {
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            string candidate = Path.Combine(directory.FullName, "src", "DeskBox", relativePath);
+            if (File.Exists(candidate))
+            {
+                return File.ReadAllText(candidate);
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new FileNotFoundException("DeskBox source root not found", relativePath);
+    }
 }

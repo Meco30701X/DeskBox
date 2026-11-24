@@ -13,7 +13,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
         Guid.NewGuid().ToString("N"));
 
     [Fact]
-    public void ProductionInventory_IsFrozenAtFortyFiveFilesAndOneHundredThirteenCalls()
+    public void ProductionInventory_IsFrozenAtFortyFiveFilesAndOneHundredTwelveCalls()
     {
         var expected = new Dictionary<string, int>(StringComparer.Ordinal)
         {
@@ -50,7 +50,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
             ["src/DeskBox/Services/ManagedStorageMigrationService.cs"] = 2,
             ["src/DeskBox/Services/NativeNotificationActivationEnvelopeStore.cs"] = 2,
             // CDP Runtime.evaluate request envelope for NetEase deep playback.
-            ["src/DeskBox/Services/NeteaseCloudMusicCdpClient.cs"] = 2,
+            ["src/DeskBox/Services/NeteaseCloudMusicCdpClient.cs"] = 1,
             ["src/DeskBox/Services/QuickCaptureStore.cs"] = 2,
             // 2: the wipe-recovery offer marker (read deserialize, atomic save serialize).
             ["src/DeskBox/Services/RecoveryOfferStore.cs"] = 2,
@@ -102,7 +102,7 @@ public sealed class JsonSerializationBaselineContractTests : IDisposable
         }
 
         Assert.Equal(45, actual.Count);
-        Assert.Equal(113, actual.Values.Sum());
+        Assert.Equal(112, actual.Values.Sum());
 
         string[] expectedContextOwners =
         [

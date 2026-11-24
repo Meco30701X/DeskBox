@@ -227,84 +227,55 @@ internal sealed class NeteaseCloudMusicCdpClient : IDisposable
             """;
     }
 
+    /// <summary>
+    /// JavaScript array of elements whose React fiber chain reaches the store's dispatch. The play bar
+    /// is normally sufficient; the transport buttons cover window layouts that mount it differently.
+    /// </summary>
+    internal const string DispatchAnchors = """["#page_pc_mini_bar", "[data-testid='tid_playbar_play_btn']", "[data-testid='tid_playbar_next_btn']", "[data-testid='tid_playmode_btn']"]""";
+
+    /// <summary>
+    /// Seeks NetEase to <paramref name="position"/> through the page's own store. No synthetic mouse
+    /// input is ever injected into NetEase: a press or drag delivered at computed coordinates lands on
+    /// whatever the window shows at that moment, and it was observed following links out of the app.
+    /// </summary>
     public async Task<bool> TrySeekAsync(TimeSpan position)
     {
         double seconds = Math.Max(0, position.TotalSeconds);
         string invariantSeconds = seconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        string? result = await TryEvaluateStringAsync(BuildSeekExpression(invariantSeconds), safeToRetry: true);
+        if (!string.Equals(result, "true", StringComparison.OrdinalIgnoreCase))
+        {
+            RecordFailure("setPlayingPosition dispatch unavailable for " + invariantSeconds + "s");
+            return false;
+        }
 
-        // First try direct Redux dispatch for exact millisecond seek without relying on window layout.
-        string dispatchExpression = $$"""
+        return true;
+    }
+
+    internal static string BuildSeekExpression(string invariantSeconds)
+    {
+        return $$"""
             (() => {
               try {
-                const barEl = document.getElementById('page_pc_mini_bar');
-                const fiberKey = barEl ? Object.keys(barEl).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')) : null;
-                let f = fiberKey ? barEl[fiberKey] : null;
-                while (f) {
-                  if (typeof f.memoizedProps?.dispatch === 'function') {
-                    f.memoizedProps.dispatch({
-                      type: 'playing/setPlayingPosition',
-                      payload: { duration: {{invariantSeconds}} }
-                    });
-                    return true;
+                for (const selector of {{DispatchAnchors}}) {
+                  const el = document.getElementById(selector) || document.querySelector(selector);
+                  const fiberKey = el ? Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')) : null;
+                  let f = fiberKey ? el[fiberKey] : null;
+                  while (f) {
+                    if (typeof f.memoizedProps?.dispatch === 'function') {
+                      f.memoizedProps.dispatch({
+                        type: 'playing/setPlayingPosition',
+                        payload: { duration: {{invariantSeconds}} }
+                      });
+                      return true;
+                    }
+                    f = f.return;
                   }
-                  f = f.return;
                 }
               } catch (e) {}
               return false;
             })()
             """;
-
-        string? dispatchResult = await TryEvaluateStringAsync(dispatchExpression, safeToRetry: true);
-        if (string.Equals(dispatchResult, "true", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        const string rectExpression = """
-            (() => {
-              const slider = document.querySelector('#page_pc_mini_bar .slider-default');
-              const input = document.querySelector('#page_pc_mini_bar input[type="range"]');
-              if (!slider || !input) return null;
-              const rect = slider.getBoundingClientRect();
-              return JSON.stringify({
-                left: rect.left,
-                top: rect.top,
-                width: rect.width,
-                height: rect.height,
-                max: Number(input.max || 0)
-              });
-            })()
-            """;
-
-        string? rectJson = await TryEvaluateStringAsync(rectExpression, safeToRetry: true);
-        if (string.IsNullOrWhiteSpace(rectJson))
-        {
-            return false;
-        }
-
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(rectJson);
-            JsonElement root = document.RootElement;
-            double left = root.GetProperty("left").GetDouble();
-            double top = root.GetProperty("top").GetDouble();
-            double width = root.GetProperty("width").GetDouble();
-            double height = root.GetProperty("height").GetDouble();
-            double maximum = root.GetProperty("max").GetDouble();
-            if (width <= 0 || height <= 0 || maximum <= 0)
-            {
-                return false;
-            }
-
-            double ratio = Math.Clamp(seconds / maximum, 0.0, 1.0);
-            double x = left + width * ratio;
-            double y = top + height / 2;
-            return await TryDispatchSliderMouseAsync(x, y);
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     /// <summary>
@@ -436,18 +407,20 @@ internal sealed class NeteaseCloudMusicCdpClient : IDisposable
         return $$"""
             (() => {
               try {
-                const barEl = document.getElementById('page_pc_mini_bar');
-                const fiberKey = barEl ? Object.keys(barEl).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')) : null;
-                let f = fiberKey ? barEl[fiberKey] : null;
-                while (f) {
-                  if (typeof f.memoizedProps?.dispatch === 'function') {
-                    f.memoizedProps.dispatch({
-                      type: 'playing/switchPlayingMode',
-                      payload: { playingMode: '{{targetMode}}', triggerScene: 'miniBar', HeartBeatFlage: true }
-                    });
-                    return true;
+                for (const selector of {{DispatchAnchors}}) {
+                  const el = document.getElementById(selector) || document.querySelector(selector);
+                  const fiberKey = el ? Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')) : null;
+                  let f = fiberKey ? el[fiberKey] : null;
+                  while (f) {
+                    if (typeof f.memoizedProps?.dispatch === 'function') {
+                      f.memoizedProps.dispatch({
+                        type: 'playing/switchPlayingMode',
+                        payload: { playingMode: '{{targetMode}}', triggerScene: 'miniBar', HeartBeatFlage: true }
+                      });
+                      return true;
+                    }
+                    f = f.return;
                   }
-                  f = f.return;
                 }
               } catch (e) {}
               return false;
@@ -765,72 +738,6 @@ internal sealed class NeteaseCloudMusicCdpClient : IDisposable
         }
 
         return null;
-    }
-
-    private async Task<bool> TryDispatchSliderMouseAsync(double x, double y)
-    {
-        if (_isDisposed)
-        {
-            return false;
-        }
-
-        await _stateLock.WaitAsync();
-        try
-        {
-            if (!await TryConnectAsync())
-            {
-                return false;
-            }
-
-            return await SendMouseEventAsync("mousePressed", x, y, buttons: 0) &&
-                await SendMouseEventAsync("mouseMoved", x, y, buttons: 1) &&
-                await SendMouseEventAsync("mouseReleased", x, y, buttons: 0);
-        }
-        catch
-        {
-            await DisconnectAsync();
-            return false;
-        }
-        finally
-        {
-            _stateLock.Release();
-        }
-    }
-
-    private async Task<bool> SendMouseEventAsync(
-        string type,
-        double x,
-        double y,
-        int buttons)
-    {
-        int id = Interlocked.Increment(ref _nextMessageId);
-        string request = JsonSerializer.Serialize(new
-        {
-            id,
-            method = "Input.dispatchMouseEvent",
-            @params = new
-            {
-                type,
-                x,
-                y,
-                button = "left",
-                buttons,
-                clickCount = 1
-            }
-        });
-
-        byte[] payload = Encoding.UTF8.GetBytes(request);
-        await _webSocket!.SendAsync(
-            payload,
-            WebSocketMessageType.Text,
-            endOfMessage: true,
-            CancellationToken.None);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        string response = await ReceiveTextAsync(_webSocket!, timeout.Token);
-        using JsonDocument document = JsonDocument.Parse(response);
-        return document.RootElement.TryGetProperty("id", out JsonElement idElement) &&
-            idElement.GetInt32() == id &&
-            !document.RootElement.TryGetProperty("error", out _);
     }
 
     private static async Task<string> ReceiveTextAsync(
